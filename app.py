@@ -17,6 +17,12 @@ PLATA = "#F0F0F0"
 BRONCE = "#E6C2A5"
 AZUL_ELECTRICO = "#247CFF"
 NARANJA_MPR = "#FF6B00"
+HAZANAS = ["LOW TON", "HAT TRICK", "6M", "7M", "8M", "9M"]
+COLS_CLASIFICACION = [
+    "Jugador", "PJ", "PG", "PP", "SF", "SC",
+    "LOW TON", "HAT TRICK", "6M", "7M", "8M", "9M",
+    "PPD", "MPR",
+]
 
 st.markdown(
     """
@@ -96,6 +102,11 @@ def _juego_tipo(value) -> str:
     return ""
 
 
+def _to_int(value) -> int:
+    n = pd.to_numeric(value, errors="coerce")
+    return 0 if pd.isna(n) else int(n)
+
+
 def _rename_resultados(df: pd.DataFrame) -> pd.DataFrame:
     mapa = {
         "DIVISION": "División",
@@ -112,7 +123,7 @@ def _rename_resultados(df: pd.DataFrame) -> pd.DataFrame:
         "MEDIA J2": "Media J2",
         "GANADOR LEG": "Ganador Leg",
     }
-    return df.rename(columns={c: mapa.get(str(c).strip().upper(), c) for c in df.columns})
+    return df.rename(columns={c: mapa.get(str(c).strip().upper(), str(c).strip()) for c in df.columns})
 
 
 def _rename_calendario(df: pd.DataFrame) -> pd.DataFrame:
@@ -123,7 +134,7 @@ def _rename_calendario(df: pd.DataFrame) -> pd.DataFrame:
         "JUGADOR 1": "Jugador 1",
         "JUGADOR 2": "Jugador 2",
     }
-    return df.rename(columns={c: mapa.get(str(c).strip().upper(), c) for c in df.columns})
+    return df.rename(columns={c: mapa.get(str(c).strip().upper(), str(c).strip()) for c in df.columns})
 
 
 @st.cache_data
@@ -143,6 +154,11 @@ def cargar_datos():
         for col in ["Media J1", "Media J2"]:
             if col in df_resultados.columns:
                 df_resultados[col] = pd.to_numeric(df_resultados[col], errors="coerce")
+        for h in HAZANAS:
+            for prefijo in ("J1", "J2"):
+                col = f"{prefijo} {h}"
+                if col in df_resultados.columns:
+                    df_resultados[col] = pd.to_numeric(df_resultados[col], errors="coerce").fillna(0)
 
         df_resultados = df_resultados.dropna(subset=["Jugador 1", "Jugador 2"], how="any")
         df_calendario = df_calendario.dropna(subset=["Jugador 1", "Jugador 2"], how="any")
@@ -248,6 +264,32 @@ def medias_jugadores(df_medias_partido: pd.DataFrame) -> pd.DataFrame:
     return resumen[["jugador", "PPD", "MPR"]]
 
 
+def hazañas_jugadores(df_resultados: pd.DataFrame, division: str) -> pd.DataFrame:
+    """Suma J1... si el jugador es Jugador 1 y J2... si es Jugador 2."""
+    totales = {}
+    df = df_resultados[
+        df_resultados["División"].astype(str).str.casefold() == division.casefold()
+    ]
+    lados = (
+        ("Jugador 1", {h: f"J1 {h}" for h in HAZANAS}),
+        ("Jugador 2", {h: f"J2 {h}" for h in HAZANAS}),
+    )
+    for _, row in df.iterrows():
+        for jugador_col, cols in lados:
+            clave = _name_key(row.get(jugador_col))
+            if not clave or _is_bye(clave):
+                continue
+            if clave not in totales:
+                totales[clave] = {h: 0 for h in HAZANAS}
+            for hazaña, col in cols.items():
+                if col in df.columns:
+                    totales[clave][hazaña] += _to_int(row.get(col))
+    if not totales:
+        return pd.DataFrame(columns=["jugador", *HAZANAS])
+    out = pd.DataFrame.from_dict(totales, orient="index").reset_index().rename(columns={"index": "jugador"})
+    return out[["jugador", *HAZANAS]]
+
+
 def jugadores_division(df_calendario: pd.DataFrame, division: str) -> dict:
     cal = df_calendario[df_calendario["División"].str.casefold() == division.casefold()]
     nombres = {}
@@ -266,9 +308,12 @@ def mapa_nombres(df_calendario: pd.DataFrame) -> dict:
     return nombres
 
 
-def clasificacion(df_calendario, df_partidos, df_medias, division: str) -> pd.DataFrame:
+def clasificacion(df_calendario, df_partidos, df_medias, df_resultados, division: str) -> pd.DataFrame:
     nombres = jugadores_division(df_calendario, division)
-    tabla = {k: {"Jugador": v, "PJ": 0, "PG": 0, "PP": 0, "SF": 0, "SC": 0} for k, v in nombres.items()}
+    tabla = {
+        k: {"Jugador": v, "PJ": 0, "PG": 0, "PP": 0, "SF": 0, "SC": 0, **{h: 0 for h in HAZANAS}}
+        for k, v in nombres.items()
+    }
 
     if not df_partidos.empty:
         part = df_partidos[df_partidos["División"].astype(str).str.casefold() == division.casefold()]
@@ -295,7 +340,25 @@ def clasificacion(df_calendario, df_partidos, df_medias, division: str) -> pd.Da
     if out.empty:
         return out
 
-    out["+/-"] = out["SF"] - out["SC"]
+    hazañas = hazañas_jugadores(df_resultados, division)
+    if not hazañas.empty:
+        out = out.merge(
+            hazañas.rename(columns={"jugador": "_k"}),
+            how="left",
+            left_on=out["Jugador"].map(_name_key),
+            right_on="_k",
+            suffixes=("", "_sum"),
+        )
+        out = out.drop(columns=["_k"], errors="ignore")
+        for h in HAZANAS:
+            col_sum = f"{h}_sum"
+            if col_sum in out.columns:
+                out[h] = pd.to_numeric(out[col_sum], errors="coerce").fillna(0).astype(int)
+                out = out.drop(columns=[col_sum])
+            elif h in out.columns:
+                out[h] = pd.to_numeric(out[h], errors="coerce").fillna(0).astype(int)
+
+    out["diff_sets"] = out["SF"] - out["SC"]
     out = out.merge(
         df_medias.rename(columns={"jugador": "_k"}),
         how="left",
@@ -307,10 +370,13 @@ def clasificacion(df_calendario, df_partidos, df_medias, division: str) -> pd.Da
         if col not in out.columns:
             out[col] = pd.NA
         out[col] = pd.to_numeric(out[col], errors="coerce").round(2)
+    for h in HAZANAS:
+        if h not in out.columns:
+            out[h] = 0
+        out[h] = pd.to_numeric(out[h], errors="coerce").fillna(0).astype(int)
 
-    out = out.sort_values(["PG", "+/-", "SF"], ascending=[False, False, False], kind="mergesort")
-    out.insert(0, "Pos", range(1, len(out) + 1))
-    return out[["Pos", "Jugador", "PJ", "PG", "PP", "SF", "SC", "+/-", "PPD", "MPR"]].reset_index(drop=True)
+    out = out.sort_values(["PG", "diff_sets", "SF"], ascending=[False, False, False], kind="mergesort")
+    return out[COLS_CLASIFICACION].reset_index(drop=True)
 
 
 def estilo_clasificacion(df: pd.DataFrame):
@@ -323,9 +389,9 @@ def estilo_clasificacion(df: pd.DataFrame):
 
     def _pinta(data: pd.DataFrame) -> pd.DataFrame:
         styles = pd.DataFrame("", index=data.index, columns=data.columns)
-        for i, row in data.iterrows():
-            if row["Pos"] in podium:
-                styles.loc[i, :] = podium[int(row["Pos"])]
+        for rank, i in enumerate(data.index, start=1):
+            if rank in podium:
+                styles.loc[i, :] = podium[rank]
         for col in ("PPD", "MPR"):
             serie = pd.to_numeric(data[col], errors="coerce")
             if serie.notna().any():
@@ -498,11 +564,11 @@ for tab, division in ((tab1, "Division 1"), (tab2, "Division 2")):
         st.divider()
 
         st.subheader("Clasificación")
-        tabla = clasificacion(df_calendario, df_partidos, df_medias, division)
+        tabla = clasificacion(df_calendario, df_partidos, df_medias, df_resultados, division)
         if tabla.empty:
             st.info("Aún no hay jugadores o resultados en esta división.")
         else:
-            st.dataframe(estilo_clasificacion(tabla), use_container_width=True)
+            st.dataframe(estilo_clasificacion(tabla), use_container_width=True, hide_index=True)
 
         st.divider()
         st.subheader("Calendario")
@@ -551,4 +617,5 @@ with tab3:
             st.dataframe(
                 evo.style.format({"PPD": "{:.2f}", "MPR": "{:.2f}"}, na_rep="—").hide(axis="index"),
                 use_container_width=True,
+                hide_index=True,
             )
