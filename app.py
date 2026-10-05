@@ -136,6 +136,7 @@ def _rename_calendario(df: pd.DataFrame) -> pd.DataFrame:
     return df.rename(columns={c: mapa.get(str(c).strip().upper(), str(c).strip()) for c in df.columns})
 
 
+@st.cache_data(ttl=60)
 def cargar_datos():
     try:
         df_resultados = pd.read_excel("datos_liga.xlsx", sheet_name="Resultados", header=1)
