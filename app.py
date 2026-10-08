@@ -39,7 +39,8 @@ st.markdown(
         border-radius: 20px;
         box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08);
       }
-      h1, h2, h3 { letter-spacing: 0.04em; color: #111 !important; }
+      .block-container h1, .block-container h2, .block-container h3 { letter-spacing: 0.04em; color: #111 !important; }
+      [data-testid="stDialog"] h2 { color: #f0f0f0 !important; }
       [data-testid="stDataFrame"],
       [data-testid="stDataFrameResizable"] {
         background: rgba(255, 255, 255, 0.96) !important;
@@ -65,11 +66,7 @@ st.markdown(
         padding: 12px 16px;
       }
       div[data-testid="stMetric"] label { color: #d4af37 !important; font-weight: 700 !important; }
-      div[data-testid="stMetric"] [data-testid="stMetricValue"] { 
-        color: #fff8dc !important; 
-        font-size: 1.1rem !important; 
-        white-space: normal !important; 
-      }
+      div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: #fff8dc !important; font-size: 1.6rem !important; }
       div[data-testid="stMetricDelta"] svg { display: none !important; }
       div[data-testid="stMetricDelta"] { color: #f3e5ab !important; }
       .liga-kicker {
@@ -401,12 +398,25 @@ def mapa_nombres(df_calendario: pd.DataFrame) -> dict:
 def clasificacion_general(df_calendario, df_partidos, df_resultados, division: str) -> pd.DataFrame:
     nombres = jugadores_division(df_calendario, division)
     tabla = {
-        k: {"Jugador": v, "PJ": 0, "PG": 0, "PP": 0, "SF": 0, "SC": 0, "LF": 0, "LC": 0} 
+        k: {"Jugador": v, "Forma": "", "PJ": 0, "PG": 0, "PP": 0, "SF": 0, "SC": 0, "LF": 0, "LC": 0} 
         for k, v in nombres.items()
     }
 
     if not df_partidos.empty:
-        part = df_partidos[df_partidos["División"].astype(str).str.casefold() == division.casefold()]
+        part = df_partidos[df_partidos["División"].astype(str).str.casefold() == division.casefold()].copy()
+        part = part.sort_values("jornada_n")
+        
+        for k in tabla:
+            match_k = part[part["pareja"].apply(lambda p: k in p)]
+            last_3 = match_k.tail(3)
+            forma = []
+            for _, row in last_3.iterrows():
+                if row["ganador"] == k:
+                    forma.append("✅")
+                else:
+                    forma.append("❌")
+            tabla[k]["Forma"] = "".join(forma)
+            
         for _, p in part.iterrows():
             a, b = p["pareja"]
             if _is_bye(a) or _is_bye(b):
@@ -449,7 +459,7 @@ def clasificacion_general(df_calendario, df_partidos, df_resultados, division: s
     
     out.insert(0, "Pos", range(1, len(out) + 1))
     
-    return out[["Pos", "Jugador", "PJ", "PG", "PP", "SF", "SC", "LF", "LC"]].reset_index(drop=True)
+    return out[["Pos", "Jugador", "Forma", "PJ", "PG", "PP", "SF", "SC", "LF", "LC"]].reset_index(drop=True)
 
 
 def clasificacion_estadisticas(df_calendario, df_resultados, df_medias, division: str) -> pd.DataFrame:
@@ -732,7 +742,15 @@ def _columnas_fijas(data) -> dict:
             cfg[col] = st.column_config.NumberColumn(
                 col, width=44, format="%d", alignment="center", disabled=True, pinned=True
             )
-        elif col in {"Jugador", "Rival"}:
+        elif col == "Jugador":
+            cfg[col] = st.column_config.TextColumn(
+                col, width=90, alignment="left", disabled=True
+            )
+        elif col == "Forma":
+            cfg[col] = st.column_config.TextColumn(
+                col, width=70, alignment="center", disabled=True
+            )
+        elif col == "Rival":
             cfg[col] = st.column_config.TextColumn(
                 col, width=118, alignment="left", disabled=True
             )
@@ -764,7 +782,6 @@ def mostrar_tabla(data, key: str):
         column_config=_columnas_fijas(data),
         key=key,
         row_height=30,
-        on_select="rerun",
         selection_mode="single-column",
     )
 
@@ -887,6 +904,197 @@ def pintar_records_individual(df_resultados, jugador_k, nombres):
             st.metric("Mejor MPR (Leg)", "—", "Sin datos", delta_color="off")
 
 
+@st.dialog("📋 Acta del Partido", width="large")
+def acta_dialog(j1_name, j2_name, jornada_n, division, df_resultados):
+    k1, k2 = _name_key(j1_name), _name_key(j2_name)
+    df_partido = df_resultados[
+        (df_resultados["División"].astype(str).str.casefold() == division.casefold()) &
+        (df_resultados["Jornada"].map(_jornada_num) == jornada_n)
+    ]
+    
+    mask1 = (df_partido["Jugador 1"].map(_name_key) == k1) & (df_partido["Jugador 2"].map(_name_key) == k2)
+    mask2 = (df_partido["Jugador 1"].map(_name_key) == k2) & (df_partido["Jugador 2"].map(_name_key) == k1)
+    df_partido = df_partido[mask1 | mask2]
+    
+    if df_partido.empty:
+        st.warning("No se encontraron los datos detallados (legs) de este partido.")
+        return
+
+    match_data = {1: {}, 2: {}, 3: {}}
+    col_x01 = _col_x01(division)
+    
+    haz_totales = {k1: {h: 0 for h in HAZANAS}, k2: {h: 0 for h in HAZANAS}}
+    
+    # Nuevas variables para recopilar los PPD y MPR de este partido concreto
+    sum_x01 = {k1: [], k2: []}
+    sum_ck = {k1: [], k2: []}
+    
+    for _, row in df_partido.iterrows():
+        s = _to_int(row.get("Set"))
+        l = _to_int(row.get("Leg"))
+        if s not in match_data:
+            match_data[s] = {}
+            
+        juego_str = _juego_codigo(row.get("Juego"))
+        if juego_str in {"501", "701"}: label_juego = col_x01
+        elif juego_str == "CRK": label_juego = "CK"
+        else: label_juego = ""
+        
+        ganador_k = _name_key(row.get("Ganador Leg"))
+        
+        r_j1_k = _name_key(row.get("Jugador 1"))
+        r_j2_k = _name_key(row.get("Jugador 2"))
+        
+        val_k1 = row.get("Media J1") if r_j1_k == k1 else (row.get("Media J2") if r_j2_k == k1 else pd.NA)
+        val_k2 = row.get("Media J2") if r_j2_k == k2 else (row.get("Media J1") if r_j1_k == k2 else pd.NA)
+        
+        match_data[s][l] = {
+            "juego": label_juego,
+            "ganador": ganador_k,
+            k1: val_k1,
+            k2: val_k2
+        }
+        
+        # Guardar datos para hacer la media del partido
+        if label_juego == col_x01:
+            if pd.notna(val_k1): sum_x01[k1].append(val_k1)
+            if pd.notna(val_k2): sum_x01[k2].append(val_k2)
+        elif label_juego == "CK":
+            if pd.notna(val_k1): sum_ck[k1].append(val_k1)
+            if pd.notna(val_k2): sum_ck[k2].append(val_k2)
+        
+        for h in HAZANAS:
+            haz_totales[r_j1_k][h] += _to_int(row.get(f"J1 {h}"))
+            haz_totales[r_j2_k][h] += _to_int(row.get(f"J2 {h}"))
+
+    # Calcular las medias finales del partido
+    stats_partido = {}
+    for p in [k1, k2]:
+        m_x01 = sum(sum_x01[p])/len(sum_x01[p]) if sum_x01[p] else 0
+        m_ck = sum(sum_ck[p])/len(sum_ck[p]) if sum_ck[p] else 0
+        comb = (m_ck * 10) + m_x01
+        stats_partido[p] = {"x01": m_x01, "ck": m_ck, "comb": comb}
+            
+    sets_to_show = [1, 2, 3] if match_data.get(3) else [1, 2]
+    max_leg_per_set = {s: max(match_data[s].keys()) if match_data.get(s) else 0 for s in sets_to_show}
+    
+    css = """
+    <style>
+    .acta-table { width: 100%; border-collapse: collapse; font-family: 'Segoe UI', sans-serif; text-align: center; font-size: 0.95rem; margin-top: 10px; }
+    .acta-table th, .acta-table td { border: 2px solid #222; padding: 8px 4px; }
+    .acta-header { background-color: #1a1a1a; color: #d4af37; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; }
+    .acta-set-header { background-color: #333; color: white; font-weight: 700; letter-spacing: 1.5px; }
+    .acta-stats-header { background-color: #444; color: #fff; font-weight: 800; font-size: 0.85em; }
+    .acta-leg-header { background-color: #555; color: #ffd700; font-size: 0.8em; font-weight: 800; line-height: 1.2; }
+    .cell-win { background-color: #D32F2F; color: white; font-weight: 900; }
+    .cell-loss { background-color: #d9d9d9; color: #555; font-weight: 700; }
+    .cell-empty { background-color: #f0f0f0; }
+    .player-name { background-color: #111; color: white; text-align: center; font-weight: 800; font-size: 1.25rem; }
+    .hazanas-cell { background-color: #222; color: #d4af37; font-weight: 700; font-size: 1rem; text-align: center; }
+    .stats-cell { background-color: #2b2b2b; color: #fff; font-weight: 800; font-size: 1.05rem; text-align: center; border-left: 2px solid #111; border-right: 2px solid #111; }
+    .starter-dot { font-size: 1.4em; line-height: 0; vertical-align: middle; margin-right: 4px; }
+    </style>
+    """
+    
+    html = [css, "<div style='overflow-x: auto;'><table class='acta-table'>"]
+    
+    html.append("<tr><th rowspan='2' class='acta-header'>JUGADOR</th>")
+    for s in sets_to_show:
+        max_l = max_leg_per_set[s]
+        if max_l > 0:
+            html.append(f"<th colspan='{max_l}' class='acta-set-header'>SET {s}</th>")
+            
+    # Añadimos la cabecera general de las MEDIAS
+    html.append("<th colspan='3' class='acta-set-header' style='background-color:#2b2b2b;'>MEDIAS</th>")
+    html.append(f"<th colspan='{len(HAZANAS)}' class='acta-set-header'>HAZAÑAS</th></tr>")
+    
+    html.append("<tr>")
+    for s in sets_to_show:
+        max_l = max_leg_per_set[s]
+        for l in range(1, max_l + 1):
+            juego_label = match_data.get(s, {}).get(l, {}).get("juego", "")
+            if not juego_label:
+                html.append(f"<th class='acta-leg-header'>—<br>{l}</th>")
+            else:
+                html.append(f"<th class='acta-leg-header'>{juego_label}<br>{l}</th>")
+                
+    # Añadimos las sub-cabeceras de cada media
+    html.append(f"<th class='acta-stats-header'>COMB</th>")
+    html.append(f"<th class='acta-stats-header'>{col_x01}</th>")
+    html.append(f"<th class='acta-stats-header'>CK</th>")
+
+    for h in HAZANAS:
+        h_label = h.replace(" ", "<br>")
+        html.append(f"<th class='acta-leg-header'>{h_label}</th>")
+    html.append("</tr>")
+    
+    for p_key, p_name in [(k1, j1_name), (k2, j2_name)]:
+        html.append("<tr>")
+        html.append(f"<td class='player-name'>{p_name}</td>")
+        for s in sets_to_show:
+            max_l = max_leg_per_set[s]
+            for l in range(1, max_l + 1):
+                leg_data = match_data.get(s, {}).get(l)
+                
+                is_starter = False
+                if s in [1, 3]:
+                    if l in [1, 3, 5] and p_key == k1: is_starter = True
+                    if l in [2, 4] and p_key == k2: is_starter = True
+                elif s == 2:
+                    if l in [1, 3, 5] and p_key == k2: is_starter = True
+                    if l in [2, 4] and p_key == k1: is_starter = True
+                    
+                dot = "<span class='starter-dot'>•</span>" if is_starter else ""
+                
+                if not leg_data:
+                    html.append("<td class='cell-loss'></td>")
+                else:
+                    val = leg_data.get(p_key)
+                    val_str = f"{val:.2f}" if pd.notna(val) else "-"
+                    clase = "cell-win" if leg_data.get("ganador") == p_key else "cell-loss"
+                    html.append(f"<td class='{clase}'>{dot}{val_str}</td>")
+        
+        # Inyectamos las celdas con los valores de las medias del partido
+        html.append(f"<td class='stats-cell' style='color:#f3e5ab;'>{stats_partido[p_key]['comb']:.2f}</td>")
+        html.append(f"<td class='stats-cell' style='color:#247CFF;'>{stats_partido[p_key]['x01']:.2f}</td>")
+        html.append(f"<td class='stats-cell' style='color:#FF6B00;'>{stats_partido[p_key]['ck']:.2f}</td>")
+
+        for h in HAZANAS:
+            count = haz_totales[p_key][h]
+            html.append(f"<td class='hazanas-cell'>{count}</td>")
+        html.append("</tr>")
+        
+    html.append("</table></div>")
+    
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+
+def mostrar_calendario_interactivo(df_cal, key, division, df_resultados):
+    event = st.dataframe(
+        df_cal,
+        width="stretch",
+        height="content",
+        hide_index=True,
+        column_order=list(df_cal.columns),
+        column_config=_columnas_fijas(df_cal),
+        key=key,
+        row_height=30,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+    
+    if getattr(event, "selection", None) and getattr(event.selection, "rows", None):
+        if len(event.selection.rows) > 0:
+            idx = event.selection.rows[0]
+            row = df_cal.iloc[idx]
+            if row["Estado"] == "✅ JUGADO":
+                enf = row["Enfrentamiento"]
+                if " vs " in enf:
+                    j1, j2 = enf.split(" vs ")
+                    jornada_n = _jornada_num(row["Jornada"])
+                    acta_dialog(j1, j2, jornada_n, division, df_resultados)
+
+
 df_resultados, df_calendario = cargar_datos()
 
 st.markdown('<div class="liga-kicker">Season dashboard</div>', unsafe_allow_html=True)
@@ -925,12 +1133,12 @@ for tab, division in ((tab1, "Division 1"), (tab2, "Division 2")):
             mostrar_tabla(estilo_clasificacion_estadisticas(tabla_est), f"est-{division}")
 
         st.divider()
-        st.subheader("Calendario")
+        st.subheader("Calendario (Haz clic en un partido jugado para ver el acta)")
         cal = calendario_vista(df_calendario, df_partidos, division)
         if cal.empty:
             st.info("No hay calendario para esta división.")
         else:
-            mostrar_tabla(cal, f"cal-{division}")
+            mostrar_calendario_interactivo(cal, f"cal-{division}", division, df_resultados)
 
 with tab3:
     jugadores = sorted(nombres_all.values(), key=lambda x: x.casefold())
