@@ -45,6 +45,19 @@ st.markdown(
         background: rgba(255, 255, 255, 0.96) !important;
         border-radius: 12px;
       }
+      [data-testid="stDataFrame"] [data-testid="stElementToolbar"] {
+        display: none !important;
+      }
+      [data-testid="stDataFrame"] [role="columnheader"] {
+        pointer-events: none !important;
+        justify-content: center !important;
+        text-align: center !important;
+      }
+      [data-testid="stDataFrame"] .gdg-resizer,
+      [data-testid="stDataFrame"] [class*="resizer"] {
+        display: none !important;
+        pointer-events: none !important;
+      }
       div[data-testid="stMetric"] {
         background: linear-gradient(180deg, #1a1a1a 0%, #111 100%);
         border: 1px solid #c9a22755;
@@ -52,7 +65,13 @@ st.markdown(
         padding: 12px 16px;
       }
       div[data-testid="stMetric"] label { color: #d4af37 !important; font-weight: 700 !important; }
-      div[data-testid="stMetric"] [data-testid="stMetricValue"] { color: #fff8dc !important; }
+      div[data-testid="stMetric"] [data-testid="stMetricValue"] { 
+        color: #fff8dc !important; 
+        font-size: 1.1rem !important; 
+        white-space: normal !important; 
+      }
+      div[data-testid="stMetricDelta"] svg { display: none !important; }
+      div[data-testid="stMetricDelta"] { color: #f3e5ab !important; }
       .liga-kicker {
         color: #d4af37; font-weight: 700; letter-spacing: 0.28em;
         text-transform: uppercase; font-size: 0.78rem; margin-bottom: 0.2rem;
@@ -91,12 +110,31 @@ def _jornada_num(value) -> int | None:
 
 
 def _juego_tipo(value) -> str:
-    text = _norm_name(value).casefold()
-    if "501" in text or "701" in text:
+    codigo = _juego_codigo(value)
+    if codigo in {"501", "701"}:
         return "PPD"
-    if "cricket" in text or "cr." in text or text == "cr" or "standard cr" in text:
+    if codigo == "CRK":
         return "MPR"
     return ""
+
+
+def _juego_codigo(value) -> str:
+    text = _norm_name(value).casefold()
+    if "501" in text:
+        return "501"
+    if "701" in text:
+        return "701"
+    if "cricket" in text or "cr." in text or text == "cr" or "standard cr" in text:
+        return "CRK"
+    return ""
+
+
+def _col_x01(division: str) -> str:
+    return "501" if "2" in str(division).casefold() else "701"
+
+
+def _nombre_visible(nombres: dict, clave) -> str:
+    return nombres.get(clave, _norm_name(clave))
 
 
 def _to_int(value) -> int:
@@ -246,8 +284,10 @@ def _legs_por_jugador(df_resultados: pd.DataFrame) -> pd.DataFrame:
             registros.append({
                 "División": row["División"],
                 "jornada_n": jornada_n,
+                "Set": row.get("Set"),
                 "pareja": pareja,
                 "jugador": jugador,
+                "rival": p2 if jugador == p1 else p1,
                 "tipo": tipo,
                 "media": float(media),
             })
@@ -258,9 +298,12 @@ def _legs_por_jugador(df_resultados: pd.DataFrame) -> pd.DataFrame:
 def medias_por_partido(df_resultados: pd.DataFrame) -> pd.DataFrame:
     legs = _legs_por_jugador(df_resultados)
     if legs.empty:
-        return pd.DataFrame(columns=["División", "jornada_n", "pareja", "jugador", "tipo", "media"])
+        return pd.DataFrame(columns=["División", "jornada_n", "pareja", "jugador", "rival", "tipo", "media"])
         
-    return legs.groupby(["División", "jornada_n", "pareja", "jugador", "tipo"], as_index=False)["media"].mean()
+    return legs.groupby(
+        ["División", "jornada_n", "pareja", "jugador", "rival", "tipo"],
+        as_index=False,
+    )["media"].mean()
 
 
 def medias_jugadores(df_resultados: pd.DataFrame) -> pd.DataFrame:
@@ -289,12 +332,15 @@ def contar_legs(df_resultados: pd.DataFrame, division: str) -> dict:
         if not p1 or not p2 or _is_bye(p1) or _is_bye(p2):
             continue
             
+        codigo = _juego_codigo(row.get("Juego"))
         for p in (p1, p2):
             if p not in stats:
-                stats[p] = {"LF": 0, "LC": 0, "Legs Jugados": 0}
-            
-            stats[p]["Legs Jugados"] += 1
-            
+                stats[p] = {"LF": 0, "LC": 0, "Legs": 0, "501": 0, "701": 0, "CRK": 0}
+
+            stats[p]["Legs"] += 1
+            if codigo in stats[p]:
+                stats[p][codigo] += 1
+
             if p == ganador:
                 stats[p]["LF"] += 1
             else:
@@ -408,15 +454,18 @@ def clasificacion_general(df_calendario, df_partidos, df_resultados, division: s
 
 def clasificacion_estadisticas(df_calendario, df_resultados, df_medias, division: str) -> pd.DataFrame:
     nombres = jugadores_division(df_calendario, division)
+    col_x01 = _col_x01(division)
     tabla = {
-        k: {"Jugador": v, **{h: 0 for h in HAZANAS}, "Legs Jugados": 0} 
+        k: {"Jugador": v, **{h: 0 for h in HAZANAS}, "Legs": 0, col_x01: 0, "CRK": 0}
         for k, v in nombres.items()
     }
 
     legs_stats = contar_legs(df_resultados, division)
     for k, stat in legs_stats.items():
         if k in tabla:
-            tabla[k]["Legs Jugados"] = stat["Legs Jugados"]
+            tabla[k]["Legs"] = stat["Legs"]
+            tabla[k][col_x01] = stat.get(col_x01, 0)
+            tabla[k]["CRK"] = stat.get("CRK", 0)
 
     out = pd.DataFrame(list(tabla.values()))
     if out.empty:
@@ -454,9 +503,11 @@ def clasificacion_estadisticas(df_calendario, df_resultados, df_medias, division
             out[col] = pd.NA
         out[col] = pd.to_numeric(out[col], errors="coerce").round(2)
 
-    out = out.sort_values(["MPR"], ascending=[False], kind="mergesort")
-    
-    return out[["Jugador", *HAZANAS, "Legs Jugados", "PPD", "MPR"]].reset_index(drop=True)
+    out["COMB"] = (out["MPR"] * 10) + out["PPD"]
+    out["COMB"] = pd.to_numeric(out["COMB"], errors="coerce").round(2)
+    out = out.sort_values(["COMB"], ascending=[False], kind="mergesort", na_position="last")
+
+    return out[["Jugador", *HAZANAS, "Legs", col_x01, "CRK", "PPD", "MPR", "COMB"]].reset_index(drop=True)
 
 
 def estilo_clasificacion_general(df: pd.DataFrame):
@@ -481,15 +532,19 @@ def estilo_clasificacion_estadisticas(df: pd.DataFrame):
     
     def _pinta(data: pd.DataFrame) -> pd.DataFrame:
         styles = pd.DataFrame("", index=data.index, columns=data.columns)
-        for col in ("PPD", "MPR"):
+        for col in ("PPD", "MPR", "COMB"):
             if col in data.columns:
                 serie = pd.to_numeric(data[col], errors="coerce")
                 if serie.notna().any():
                     i = serie.idxmax()
                     styles.loc[i, col] = f"{styles.loc[i, col]} {maximo}"
         return styles
-        
-    return df.style.apply(_pinta, axis=None).format({"PPD": "{:.2f}", "MPR": "{:.2f}"}, na_rep="—").hide(axis="index")
+
+    return (
+        df.style.apply(_pinta, axis=None)
+        .format({"PPD": "{:.2f}", "MPR": "{:.2f}", "COMB": "{:.2f}"}, na_rep="—")
+        .hide(axis="index")
+    )
 
 
 def partidos_jugados_keys(df_partidos: pd.DataFrame, division: str) -> set:
@@ -507,49 +562,85 @@ def partidos_jugados_keys(df_partidos: pd.DataFrame, division: str) -> set:
 def calendario_vista(df_calendario, df_partidos, division: str) -> pd.DataFrame:
     cal = df_calendario[df_calendario["División"].str.casefold() == division.casefold()].copy()
     jugados = partidos_jugados_keys(df_partidos, division)
+    marcadores = {}
+    if not df_partidos.empty:
+        part = df_partidos[df_partidos["División"].astype(str).str.casefold() == division.casefold()]
+        for _, p in part.iterrows():
+            marcadores[(p["jornada_n"], p["pareja"])] = p["sets"]
     filas = []
-    
+
     for _, row in cal.iterrows():
         j1 = _norm_name(row["Jugador 1"])
         j2 = _norm_name(row["Jugador 2"])
         jornada_n = _jornada_num(row["Jornada"])
         bye = _is_bye(j1) or _is_bye(j2)
-        
+        clave = (jornada_n, tuple(sorted((_name_key(j1), _name_key(j2)))))
+        resultado = "-"
+
         if bye:
             descanso = j1 if _is_bye(j1) else j2
             activo = j2 if _is_bye(j1) else j1
             etiqueta = "Descansa" if _name_key(descanso) == "descansa" else "Libre"
             estado = f"🛌 {activo} {etiqueta}"
-        elif (jornada_n, tuple(sorted((_name_key(j1), _name_key(j2))))) in jugados:
+        elif clave in jugados:
             estado = "✅ JUGADO"
+            sets = marcadores.get(clave) or {}
+            k1, k2 = _name_key(j1), _name_key(j2)
+            resultado = f"{int(sets.get(k1, 0))}-{int(sets.get(k2, 0))}"
         else:
             estado = "📅 PENDIENTE"
-            
+
         filas.append({
             "Jornada": f"Jornada {jornada_n}" if jornada_n else row["Jornada"],
             "Enfrentamiento": f"{j1} vs {j2}",
+            "Resultado": resultado,
             "Estado": estado,
         })
-        
+
     return pd.DataFrame(filas)
 
 
-def record_partido(df_medias_partido: pd.DataFrame, division: str, tipo: str, nombres: dict):
-    if df_medias_partido.empty:
-        return None, None
-        
-    sub = df_medias_partido[
-        (df_medias_partido["División"].astype(str).str.casefold() == division.casefold()) & 
-        (df_medias_partido["tipo"] == tipo)
-    ]
-    
+def _medias_agrupadas(legs: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
+    if legs.empty:
+        return pd.DataFrame()
+
+    g = legs.groupby([*group_cols, "tipo"], as_index=False)["media"].mean()
+    wide = g.pivot_table(index=group_cols, columns="tipo", values="media", aggfunc="mean").reset_index()
+    for col in ("PPD", "MPR"):
+        if col not in wide.columns:
+            wide[col] = pd.NA
+    wide["COMB"] = (pd.to_numeric(wide["MPR"], errors="coerce") * 10) + pd.to_numeric(wide["PPD"], errors="coerce")
+    return wide
+
+
+def _mejor_comb(wide: pd.DataFrame, nombres: dict):
+    if wide.empty or "COMB" not in wide.columns:
+        return None
+    sub = wide.dropna(subset=["COMB"])
     if sub.empty:
-        return None, None
-        
+        return None
+    fila = sub.loc[sub["COMB"].idxmax()]
+    return {
+        "jugador": _nombre_visible(nombres, fila["jugador"]),
+        "rival": _nombre_visible(nombres, fila["rival"]),
+        "COMB": round(float(fila["COMB"]), 2),
+        "PPD": round(float(fila["PPD"]), 2),
+        "MPR": round(float(fila["MPR"]), 2),
+    }
+
+
+def _mejor_leg(legs: pd.DataFrame, tipo: str, nombres: dict):
+    if legs.empty:
+        return None
+    sub = legs[legs["tipo"] == tipo]
+    if sub.empty:
+        return None
     fila = sub.loc[sub["media"].idxmax()]
-    nombre = nombres.get(fila["jugador"], fila["jugador"])
-    
-    return nombre, round(float(fila["media"]), 2)
+    return {
+        "jugador": _nombre_visible(nombres, fila["jugador"]),
+        "rival": _nombre_visible(nombres, fila["rival"]),
+        "valor": round(float(fila["media"]), 2),
+    }
 
 
 def stats_jugador(df_partidos, df_medias, jugador_k: str) -> dict:
@@ -582,26 +673,31 @@ def stats_jugador(df_partidos, df_medias, jugador_k: str) -> dict:
     return vacio
 
 
-def evolucion_jugador(df_medias_partido: pd.DataFrame, jugador_k: str) -> pd.DataFrame:
+def evolucion_jugador(df_medias_partido: pd.DataFrame, jugador_k: str, nombres: dict) -> pd.DataFrame:
     if df_medias_partido.empty:
-        return pd.DataFrame(columns=["Jornada", "PPD", "MPR"])
+        return pd.DataFrame(columns=["Jornada", "Rival", "PPD", "MPR", "COMB"])
         
     sub = df_medias_partido[df_medias_partido["jugador"] == jugador_k].copy()
     if sub.empty:
-        return pd.DataFrame(columns=["Jornada", "PPD", "MPR"])
+        return pd.DataFrame(columns=["Jornada", "Rival", "PPD", "MPR", "COMB"])
         
     pivot = (
-        sub.pivot_table(index="jornada_n", columns="tipo", values="media", aggfunc="mean")
+        sub.pivot_table(index=["jornada_n", "rival"], columns="tipo", values="media", aggfunc="mean")
         .reset_index()
-        .rename(columns={"jornada_n": "Jornada"})
+        .rename(columns={"jornada_n": "Jornada", "rival": "Rival"})
         .sort_values("Jornada")
     )
+    
+    pivot["Rival"] = pivot["Rival"].apply(lambda r: _nombre_visible(nombres, r))
     
     for col in ("PPD", "MPR"):
         if col not in pivot.columns:
             pivot[col] = pd.NA
             
-    return pivot[["Jornada", "PPD", "MPR"]]
+    pivot["COMB"] = (pd.to_numeric(pivot["MPR"], errors="coerce") * 10) + pd.to_numeric(pivot["PPD"], errors="coerce")
+    pivot["COMB"] = pivot["COMB"].round(2)
+    
+    return pivot[["Jornada", "Rival", "PPD", "MPR", "COMB"]]
 
 
 def grafica_linea(df: pd.DataFrame, y_col: str, titulo: str, domain: list, color: str):
@@ -622,21 +718,173 @@ def grafica_linea(df: pd.DataFrame, y_col: str, titulo: str, domain: list, color
     chart = (
         (base.mark_line(color=color, strokeWidth=3) + base.mark_point(color=color, size=90, filled=True))
         .properties(title=titulo, height=280)
-        .interactive()
     )
     
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
-def pintar_records(df_medias_partido, division, nombres):
-    c1, c2 = st.columns(2)
-    n_ppd, v_ppd = record_partido(df_medias_partido, division, "PPD", nombres)
-    n_mpr, v_mpr = record_partido(df_medias_partido, division, "MPR", nombres)
-    
+def _columnas_fijas(data) -> dict:
+    frame = data.data if hasattr(data, "data") else data
+    cfg = {}
+    for col in frame.columns:
+        serie = frame[col]
+        if col == "Pos":
+            cfg[col] = st.column_config.NumberColumn(
+                col, width=44, format="%d", alignment="center", disabled=True, pinned=True
+            )
+        elif col in {"Jugador", "Rival"}:
+            cfg[col] = st.column_config.TextColumn(
+                col, width=118, alignment="left", disabled=True
+            )
+        elif col == "Enfrentamiento":
+            cfg[col] = st.column_config.TextColumn(col, width=168, alignment="center", disabled=True)
+        elif col == "Estado":
+            cfg[col] = st.column_config.TextColumn(col, width=148, alignment="center", disabled=True)
+        elif col in {"Resultado", "Jornada"} and not pd.api.types.is_numeric_dtype(serie):
+            cfg[col] = st.column_config.TextColumn(col, width=78, alignment="center", disabled=True)
+        elif col in {"PPD", "MPR", "COMB"}:
+            cfg[col] = st.column_config.NumberColumn(
+                col, width=58, format="%.2f", alignment="center", disabled=True
+            )
+        else:
+            cfg[col] = st.column_config.NumberColumn(
+                col, width=46, format="%d", alignment="center", disabled=True
+            )
+    return cfg
+
+
+def mostrar_tabla(data, key: str):
+    frame = data.data if hasattr(data, "data") else data
+    st.dataframe(
+        data,
+        width="stretch",
+        height="content",
+        hide_index=True,
+        column_order=list(frame.columns),
+        column_config=_columnas_fijas(data),
+        key=key,
+        row_height=30,
+        on_select="rerun",
+        selection_mode="single-column",
+    )
+
+
+def pintar_records(df_resultados, division, nombres):
+    legs = _legs_por_jugador(df_resultados)
+    if not legs.empty:
+        legs = legs[legs["División"].astype(str).str.casefold() == division.casefold()]
+
+    rec_partido = _mejor_comb(
+        _medias_agrupadas(legs, ["División", "jornada_n", "pareja", "jugador", "rival"]),
+        nombres,
+    )
+    rec_set = _mejor_comb(
+        _medias_agrupadas(legs, ["División", "jornada_n", "pareja", "Set", "jugador", "rival"]),
+        nombres,
+    )
+    rec_ppd = _mejor_leg(legs, "PPD", nombres)
+    rec_mpr = _mejor_leg(legs, "MPR", nombres)
+
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.metric("Mejor PPD en un Partido", f"{v_ppd:.2f}" if v_ppd is not None else "—", n_ppd or "Sin datos 501/701")
+        if rec_partido:
+            st.metric(
+                "Mejor COMB (Partido)",
+                f"{rec_partido['COMB']:.2f} (PPD {rec_partido['PPD']:.2f} - MPR {rec_partido['MPR']:.2f})",
+                f"{rec_partido['jugador']} vs {rec_partido['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor COMB (Partido)", "—", "Sin datos", delta_color="off")
     with c2:
-        st.metric("Mejor MPR en un Partido", f"{v_mpr:.2f}" if v_mpr is not None else "—", n_mpr or "Sin datos Cricket")
+        if rec_set:
+            st.metric(
+                "Mejor COMB (Set)",
+                f"{rec_set['COMB']:.2f} (PPD {rec_set['PPD']:.2f} - MPR {rec_set['MPR']:.2f})",
+                f"{rec_set['jugador']} vs {rec_set['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor COMB (Set)", "—", "Sin datos", delta_color="off")
+    with c3:
+        if rec_ppd:
+            st.metric(
+                "Mejor PPD (Leg)",
+                f"{rec_ppd['valor']:.2f}",
+                f"{rec_ppd['jugador']} vs {rec_ppd['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor PPD (Leg)", "—", "Sin datos 501/701", delta_color="off")
+    with c4:
+        if rec_mpr:
+            st.metric(
+                "Mejor MPR (Leg)",
+                f"{rec_mpr['valor']:.2f}",
+                f"{rec_mpr['jugador']} vs {rec_mpr['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor MPR (Leg)", "—", "Sin datos Cricket", delta_color="off")
+
+
+def pintar_records_individual(df_resultados, jugador_k, nombres):
+    legs = _legs_por_jugador(df_resultados)
+    if not legs.empty:
+        legs = legs[legs["jugador"] == jugador_k]
+
+    rec_partido = _mejor_comb(
+        _medias_agrupadas(legs, ["División", "jornada_n", "pareja", "jugador", "rival"]),
+        nombres,
+    )
+    rec_set = _mejor_comb(
+        _medias_agrupadas(legs, ["División", "jornada_n", "pareja", "Set", "jugador", "rival"]),
+        nombres,
+    )
+    rec_ppd = _mejor_leg(legs, "PPD", nombres)
+    rec_mpr = _mejor_leg(legs, "MPR", nombres)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if rec_partido:
+            st.metric(
+                "Mejor COMB (Partido)",
+                f"{rec_partido['COMB']:.2f} (PPD {rec_partido['PPD']:.2f} - MPR {rec_partido['MPR']:.2f})",
+                f"vs {rec_partido['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor COMB (Partido)", "—", "Sin datos", delta_color="off")
+    with c2:
+        if rec_set:
+            st.metric(
+                "Mejor COMB (Set)",
+                f"{rec_set['COMB']:.2f} (PPD {rec_set['PPD']:.2f} - MPR {rec_set['MPR']:.2f})",
+                f"vs {rec_set['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor COMB (Set)", "—", "Sin datos", delta_color="off")
+    with c3:
+        if rec_ppd:
+            st.metric(
+                "Mejor PPD (Leg)",
+                f"{rec_ppd['valor']:.2f}",
+                f"vs {rec_ppd['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor PPD (Leg)", "—", "Sin datos", delta_color="off")
+    with c4:
+        if rec_mpr:
+            st.metric(
+                "Mejor MPR (Leg)",
+                f"{rec_mpr['valor']:.2f}",
+                f"vs {rec_mpr['rival']}",
+                delta_color="off",
+            )
+        else:
+            st.metric("Mejor MPR (Leg)", "—", "Sin datos", delta_color="off")
 
 
 df_resultados, df_calendario = cargar_datos()
@@ -658,7 +906,7 @@ tab1, tab2, tab3 = st.tabs(["División 1", "División 2", "🎯 Ficha Individual
 for tab, division in ((tab1, "Division 1"), (tab2, "Division 2")):
     with tab:
         nombres = jugadores_division(df_calendario, division)
-        pintar_records(df_medias_partido, division, nombres)
+        pintar_records(df_resultados, division, nombres)
         st.divider()
 
         st.subheader("Clasificación General")
@@ -666,7 +914,7 @@ for tab, division in ((tab1, "Division 1"), (tab2, "Division 2")):
         if tabla_gen.empty:
             st.info("Aún no hay resultados para generar la clasificación general.")
         else:
-            st.dataframe(estilo_clasificacion_general(tabla_gen), use_container_width=True, hide_index=True)
+            mostrar_tabla(estilo_clasificacion_general(tabla_gen), f"gen-{division}")
 
         st.divider()
         st.subheader("Estadísticas y Hazañas")
@@ -674,7 +922,7 @@ for tab, division in ((tab1, "Division 1"), (tab2, "Division 2")):
         if tabla_est.empty:
             st.info("Aún no hay estadísticas para esta división.")
         else:
-            st.dataframe(estilo_clasificacion_estadisticas(tabla_est), use_container_width=True, hide_index=True)
+            mostrar_tabla(estilo_clasificacion_estadisticas(tabla_est), f"est-{division}")
 
         st.divider()
         st.subheader("Calendario")
@@ -682,7 +930,7 @@ for tab, division in ((tab1, "Division 1"), (tab2, "Division 2")):
         if cal.empty:
             st.info("No hay calendario para esta división.")
         else:
-            st.dataframe(cal, use_container_width=True, hide_index=True)
+            mostrar_tabla(cal, f"cal-{division}")
 
 with tab3:
     jugadores = sorted(nombres_all.values(), key=lambda x: x.casefold())
@@ -691,33 +939,31 @@ with tab3:
     else:
         elegido = st.selectbox("Elige jugador", jugadores, index=0)
         clave = _name_key(elegido)
-        stats = stats_jugador(df_partidos, df_medias, clave)
+        
+        div_serie = df_calendario[(df_calendario["Jugador 1"].map(_name_key) == clave) | (df_calendario["Jugador 2"].map(_name_key) == clave)]["División"]
+        jugador_division = div_serie.iloc[0] if not div_serie.empty else "1"
+        is_div_1 = "1" in str(jugador_division)
+        
         st.divider()
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("PJ", stats["PJ"])
-        m2.metric("PG", stats["PG"])
-        m3.metric("PP", stats["PP"])
-        m4.metric("Sets +/−", stats["SF"] - stats["SC"])
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Sets a favor", stats["SF"])
-        c2.metric("Sets en contra", stats["SC"])
-        c3.metric("Media PPD", f"{stats['PPD']:.2f}" if pd.notna(stats["PPD"]) else "—")
-        c4.metric("Media MPR", f"{stats['MPR']:.2f}" if pd.notna(stats["MPR"]) else "—")
+        
+        pintar_records_individual(df_resultados, clave, nombres_all)
 
         st.divider()
         st.subheader("Evolución de medias por jornada")
-        evo = evolucion_jugador(df_medias_partido, clave)
+        evo = evolucion_jugador(df_medias_partido, clave, nombres_all)
         if evo.empty or (evo[["PPD", "MPR"]].isna().all().all()):
             st.info("Este jugador aún no tiene medias registradas.")
         else:
-            grafica_linea(evo, "PPD", "Evolución PPD", [10, 45], AZUL_ELECTRICO)
-            grafica_linea(evo, "MPR", "Evolución MPR", [1, 6], NARANJA_MPR)
-            st.dataframe(
-                evo.style.format({"PPD": "{:.2f}", "MPR": "{:.2f}"}, na_rep="—").hide(axis="index"),
-                use_container_width=True,
-                hide_index=True,
+            if is_div_1:
+                dom_ppd = [25, 46]
+                dom_mpr = [2.40, 5.40]
+            else:
+                dom_ppd = [15, 35]
+                dom_mpr = [1.30, 4.30]
+                
+            grafica_linea(evo, "PPD", "Evolución PPD", dom_ppd, AZUL_ELECTRICO)
+            grafica_linea(evo, "MPR", "Evolución MPR", dom_mpr, NARANJA_MPR)
+            mostrar_tabla(
+                evo.style.format({"PPD": "{:.2f}", "MPR": "{:.2f}", "COMB": "{:.2f}"}, na_rep="—").hide(axis="index"),
+                "evo-jugador",
             )
-
-            
