@@ -1082,17 +1082,23 @@ def mostrar_calendario_interactivo(df_cal, key, division, df_resultados):
         on_select="rerun",
         selection_mode="single-row",
     )
-    
-    if getattr(event, "selection", None) and getattr(event.selection, "rows", None):
-        if len(event.selection.rows) > 0:
-            idx = event.selection.rows[0]
-            row = df_cal.iloc[idx]
-            if row["Estado"] == "✅ JUGADO":
-                enf = row["Enfrentamiento"]
-                if " vs " in enf:
-                    j1, j2 = enf.split(" vs ")
-                    jornada_n = _jornada_num(row["Jornada"])
-                    acta_dialog(j1, j2, jornada_n, division, df_resultados)
+
+    seleccion = getattr(event, "selection", None)
+    rows = list(getattr(seleccion, "rows", [])) if seleccion else []
+    prev_key = f"prev_sel_{key}"
+    prev_rows = st.session_state.get(prev_key, [])
+    st.session_state[prev_key] = rows
+
+    if len(rows) > 0 and rows != prev_rows:
+        idx = rows[0]
+        row = df_cal.iloc[idx]
+        if row["Estado"] == "✅ JUGADO":
+            enf = row["Enfrentamiento"]
+            if " vs " in enf:
+                j1, j2 = enf.split(" vs ")
+                jornada_n = _jornada_num(row["Jornada"])
+                acta_dialog(j1, j2, jornada_n, division, df_resultados)
+
 
 
 df_resultados, df_calendario = cargar_datos()
